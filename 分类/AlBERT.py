@@ -15,26 +15,23 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ====================== 路径配置（完全不变）=====================
+# 你的数据根目录（绝对路径）
 DATA_ROOT = "/Users/lhc456/Desktop/nlp课程/play_with_some_classical_nlpnetwork/data"
+# 你的代码根目录（绝对路径）
 CODE_ROOT = "/Users/lhc456/Desktop/nlp课程/play_with_some_classical_nlpnetwork"
 
+# 自动创建目录（如果不存在）
 os.makedirs(DATA_ROOT, exist_ok=True)
 os.makedirs(CODE_ROOT, exist_ok=True)
 
 
-# ====================== 1. 数据处理（五重保险修复pad_token）=====================
+# ====================== 1. 数据处理（完全不变，原生支持padding）=====================
 class TextDataset(Dataset):
     def __init__(self, texts, labels, tokenizer, max_len=64):
         self.texts = texts
         self.labels = labels
         self.tokenizer = tokenizer
         self.max_len = max_len
-
-        # 第一重保险：Dataset初始化时强制设置pad_token
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-            print("✅ Dataset中添加了新的pad_token: [PAD]")
-        print(f"✅ Dataset确认pad_token: {self.tokenizer.pad_token}, pad_token_id: {self.tokenizer.pad_token_id}")
 
     def __len__(self):
         return len(self.texts)
@@ -44,23 +41,18 @@ class TextDataset(Dataset):
             text = str(self.texts[idx]).strip()
             label = int(self.labels[idx])
 
-            # 第二重保险：手动处理padding，不依赖tokenizer的自动padding
-            tokens = self.tokenizer.tokenize(text)
-            if len(tokens) > self.max_len - 2:
-                tokens = tokens[:self.max_len - 2]
-
-            # 手动添加特殊token
-            tokens = ['<s>'] + tokens + ['</s>']
-            input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
-
-            # 手动padding
-            padding_length = self.max_len - len(input_ids)
-            input_ids += [self.tokenizer.pad_token_id] * padding_length
-            attention_mask = [1] * len(tokens) + [0] * padding_length
+            # AlBERT原生支持padding，不需要任何额外设置
+            encoding = self.tokenizer(
+                text,
+                truncation=True,
+                padding="max_length",
+                max_length=self.max_len,
+                return_tensors="pt"
+            )
 
             return {
-                "input_ids": torch.tensor(input_ids, dtype=torch.long),
-                "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+                "input_ids": encoding["input_ids"].flatten(),
+                "attention_mask": encoding["attention_mask"].flatten(),
                 "label": torch.tensor(label, dtype=torch.long)
             }
         except Exception as e:
@@ -73,6 +65,12 @@ class TextDataset(Dataset):
 
 
 def load_data(train_path, dev_path=None, test_path=None, min_freq=1, test_size=0.2):
+    """
+    加载数据：接口完全不变
+    - 如果提供dev_path，使用独立验证集
+    - 如果未提供dev_path，从训练集随机划分20%作为验证集
+    - 分词器和标签映射仅从训练集构建
+    """
     print(f"正在加载训练集：{train_path}")
     train_df = pd.read_csv(train_path, sep="\t", header=0, names=["sentence", "label"], on_bad_lines="skip")
     train_df = train_df.dropna(subset=["sentence", "label"])
@@ -80,6 +78,7 @@ def load_data(train_path, dev_path=None, test_path=None, min_freq=1, test_size=0
     train_df = train_df[train_df["sentence"].str.strip() != ""]
     print(f"训练集有效行数：{len(train_df)}")
 
+    # 仅从训练集构建标签映射（完全不变）
     train_raw_labels = train_df["label"].tolist()
     unique_labels = sorted(list(set(train_raw_labels)))
     label2id = {label: i for i, label in enumerate(unique_labels)}
@@ -89,10 +88,11 @@ def load_data(train_path, dev_path=None, test_path=None, min_freq=1, test_size=0
     print(f"标签映射：{label2id}")
     print(f"标签分布：{Counter(train_raw_labels)}")
 
+    # 转换标签（完全不变）
     train_labels = [label2id[label] for label in train_raw_labels]
     train_texts = train_df["sentence"].tolist()
 
-    # 处理验证集
+    # 处理验证集（完全不变）
     dev_texts, dev_labels = [], []
     if dev_path and os.path.exists(dev_path):
         print(f"\n正在加载独立验证集：{dev_path}")
@@ -112,7 +112,7 @@ def load_data(train_path, dev_path=None, test_path=None, min_freq=1, test_size=0
         )
         print(f"划分后训练集大小：{len(train_texts)}，验证集大小：{len(dev_texts)}")
 
-    # 处理测试集
+    # 处理测试集（完全不变）
     test_texts, test_labels = [], []
     if test_path and os.path.exists(test_path):
         print(f"\n正在加载测试集：{test_path}")
@@ -126,51 +126,38 @@ def load_data(train_path, dev_path=None, test_path=None, min_freq=1, test_size=0
         test_raw_labels = test_df["label"].tolist()
         test_labels = [label2id.get(label, 0) for label in test_raw_labels]
 
-    # 加载GPT2中文分词器
-    print("\n加载GPT2中文分词器...")
+    # 加载AlBERT中文分词器（原生支持pad_token）
+    print("\n加载AlBERT中文分词器...")
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained("uer/gpt2-chinese-cluecorpussmall")
-
-    # 第零重保险：使用add_special_tokens方法添加pad_token（最可靠）
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-        print("✅ 添加了新的pad_token: [PAD]")
-    tokenizer.padding_side = "right"
-    tokenizer.truncation_side = "right"
-    print(f"✅ GPT2分词器加载完成")
-    print(f"  pad_token: {tokenizer.pad_token}")
-    print(f"  pad_token_id: {tokenizer.pad_token_id}")
-    print(f"  eos_token: {tokenizer.eos_token}")
-    print(f"  eos_token_id: {tokenizer.eos_token_id}")
+    tokenizer = AutoTokenizer.from_pretrained("hfl/chinese-albert-base")
+    print(f"✅ AlBERT分词器加载完成，词汇表大小：{len(tokenizer)}")
+    print(f"  原生pad_token: {tokenizer.pad_token}")
+    print(f"  原生pad_token_id: {tokenizer.pad_token_id}")
 
     return (train_texts, train_labels, dev_texts, dev_labels, test_texts, test_labels,
             tokenizer, label2id, id2label, num_classes)
 
 
-# ====================== 2. GPT2模型（修复pad_token配置）=====================
-class GPT2TextCls(nn.Module):
-    def __init__(self, num_classes, tokenizer, dropout=0.1):
+# ====================== 2. AlBERT模型（接口与所有模型完全一致）=====================
+class AlBERTTextCls(nn.Module):
+    def __init__(self, num_classes, dropout=0.1):
         super().__init__()
         from transformers import AutoModelForSequenceClassification
-        # 加载预训练GPT2模型
-        self.gpt2 = AutoModelForSequenceClassification.from_pretrained(
-            "uer/gpt2-chinese-cluecorpussmall",
+        # 加载预训练AlBERT模型（轻量级，速度最快）
+        self.albert = AutoModelForSequenceClassification.from_pretrained(
+            "hfl/chinese-albert-base",
             num_labels=num_classes
         )
 
-        # 第三重保险：模型配置必须和tokenizer一致
-        self.gpt2.config.pad_token_id = tokenizer.pad_token_id
-        self.gpt2.resize_token_embeddings(len(tokenizer))
-        print(f"✅ GPT2模型配置pad_token_id: {self.gpt2.config.pad_token_id}")
-
-        # 冻结前10层，只训练最后2层
-        for param in list(self.gpt2.parameters())[:-4]:
+        # 冻结前8层，只训练最后2层（AlBERT参数共享，冻结更少层效果更好）
+        for param in list(self.albert.parameters())[:-4]:
             param.requires_grad = False
 
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, input_ids, attention_mask=None):
-        outputs = self.gpt2(input_ids=input_ids, attention_mask=attention_mask)
+        # 接口与所有模型完全一致：输入张量，输出logits
+        outputs = self.albert(input_ids=input_ids, attention_mask=attention_mask)
         return self.dropout(outputs.logits)
 
 
@@ -192,14 +179,17 @@ def train(model, dataloader, optimizer, criterion, device):
         loss.backward()
         optimizer.step()
 
+        # 计算当前批次的准确率
         pred = torch.argmax(outputs, dim=1)
         batch_correct = (pred == y).sum().item()
         batch_acc = batch_correct / len(y)
 
+        # 累加全局统计
         total_loss += loss.item()
         total_correct += batch_correct
         total_samples += len(y)
 
+        # 实时打印批次信息
         print(f"  批次 {batch_idx + 1}/{len(dataloader)} | 损失：{loss.item():.4f} | 准确率：{batch_acc:.4f}")
 
     epoch_loss = total_loss / len(dataloader)
@@ -238,14 +228,18 @@ def evaluate(model, dataloader, criterion, device, dataset_name="验证集"):
 
 
 def test_model(model, test_loader, criterion, device, id2label, save_report=True):
+    """完整的测试集评估，输出详细报告和混淆矩阵（完全不变）"""
     test_loss, test_acc, all_preds, all_labels = evaluate(
         model, test_loader, criterion, device, dataset_name="测试集"
     )
 
+    # 生成分类报告
     target_names = [str(id2label[i]) for i in range(len(id2label))]
     report = classification_report(
         all_labels, all_preds, target_names=target_names, digits=4
     )
+
+    # 生成混淆矩阵
     cm = confusion_matrix(all_labels, all_preds)
 
     print("\n" + "=" * 60)
@@ -256,8 +250,9 @@ def test_model(model, test_loader, criterion, device, id2label, save_report=True
     print(cm)
     print("=" * 60)
 
+    # 保存报告和混淆矩阵
     if save_report:
-        report_path = os.path.join(CODE_ROOT, "gpt2_test_report.txt")
+        report_path = os.path.join(CODE_ROOT, "albert_test_report.txt")
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(f"测试集准确率：{test_acc:.4f}\n\n")
             f.write("分类报告：\n")
@@ -266,35 +261,45 @@ def test_model(model, test_loader, criterion, device, id2label, save_report=True
             f.write(str(cm))
         print(f"\n✅ 测试报告已保存为 {report_path}")
 
+        # 绘制并保存混淆矩阵图
         plt.figure(figsize=(10, 8))
         sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
                     xticklabels=target_names, yticklabels=target_names)
         plt.xlabel("预测标签")
         plt.ylabel("真实标签")
-        plt.title("GPT2测试集混淆矩阵")
-        cm_path = os.path.join(CODE_ROOT, "gpt2_confusion_matrix.png")
+        plt.title("AlBERT测试集混淆矩阵")
+        cm_path = os.path.join(CODE_ROOT, "albert_confusion_matrix.png")
         plt.savefig(cm_path, dpi=300, bbox_inches="tight")
         print(f"✅ 混淆矩阵图已保存为 {cm_path}")
 
     return test_loss, test_acc, report, cm
 
 
-# ====================== 4. 主函数 =====================
+# ====================== 4. 主函数（几乎完全不变）=====================
 if __name__ == "__main__":
+    # 配置（AlBERT最轻量，batch_size可以开到最大）
     TRAIN_PATH = os.path.join(DATA_ROOT, "train.txt")
     DEV_PATH = os.path.join(DATA_ROOT, "dev.txt")
     TEST_PATH = os.path.join(DATA_ROOT, "test.txt")
 
-    BATCH_SIZE = 1000
+    BATCH_SIZE = 64  # AlBERT可以用更大的batch_size
     EPOCHS = 3
     LR = 2e-5
     MAX_LEN = 64
     DROPOUT = 0.1
 
-    # 强制使用CPU
-    device = torch.device("cpu")
-    print("使用 CPU 运行（解决GPT2 MPS兼容性问题）")
+    # 设备配置（AlBERT在MPS上兼容性很好）
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"使用 NVIDIA GPU: {torch.cuda.get_device_name(0)}")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("使用 Apple Silicon GPU (MPS)")
+    else:
+        device = torch.device("cpu")
+        print("使用 CPU")
 
+    # 检查数据文件（完全不变）
     print("\n检查数据文件...")
     if not os.path.exists(TRAIN_PATH):
         print(f"❌ 训练集文件不存在：{TRAIN_PATH}")
@@ -311,6 +316,7 @@ if __name__ == "__main__":
     else:
         print(f"⚠️ 未找到测试集，将不进行测试集评估")
 
+    # 加载数据（接口完全不变）
     try:
         (train_texts, train_labels, dev_texts, dev_labels, test_texts, test_labels,
          tokenizer, label2id, id2label, num_classes) = load_data(TRAIN_PATH, DEV_PATH, TEST_PATH)
@@ -318,6 +324,7 @@ if __name__ == "__main__":
         print(f"❌ 数据加载失败：{e}")
         exit()
 
+    # 构建数据集和加载器（完全不变）
     print("\n构建数据集...")
     train_dataset = TextDataset(train_texts, train_labels, tokenizer, MAX_LEN)
     dev_dataset = TextDataset(dev_texts, dev_labels, tokenizer, MAX_LEN)
@@ -350,13 +357,16 @@ if __name__ == "__main__":
     if test_loader:
         print(f"测试集批次数量：{len(test_loader)}")
 
-    print("\n初始化GPT2文本分类模型...")
-    model = GPT2TextCls(num_classes, tokenizer, DROPOUT).to(device)
+    # 初始化AlBERT模型（接口与所有模型完全一致）
+    print("\n初始化AlBERT文本分类模型...")
+    model = AlBERTTextCls(num_classes, DROPOUT).to(device)
     print(f"可训练参数数量：{sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
+    # 优化器和损失函数（完全不变）
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     criterion = nn.CrossEntropyLoss()
 
+    # 训练循环（完全不变）
     best_dev_acc = 0
     print("\n" + "=" * 60)
     print("开始训练循环")
@@ -378,19 +388,20 @@ if __name__ == "__main__":
                     "DROPOUT": DROPOUT,
                     "MAX_LEN": MAX_LEN
                 }
-            }, os.path.join(CODE_ROOT, "best_gpt2_cls_model.pth"))
-            print("\n✅ 保存最佳GPT2模型")
+            }, os.path.join(CODE_ROOT, "best_albert_cls_model.pth"))
+            print("\n✅ 保存最佳AlBERT模型")
 
     print("\n" + "=" * 60)
     print(f"训练完成！最佳验证准确率：{best_dev_acc:.4f}")
     print("=" * 60)
 
+    # 加载最佳模型进行测试集评估（完全不变）
     if test_loader:
         print("\n" + "=" * 60)
         print("开始测试集评估")
         print("=" * 60)
 
-        checkpoint = torch.load(os.path.join(CODE_ROOT, "best_gpt2_cls_model.pth"))
+        checkpoint = torch.load(os.path.join(CODE_ROOT, "best_albert_cls_model.pth"))
         model.load_state_dict(checkpoint["model_state_dict"])
 
         test_loss, test_acc, test_report, test_cm = test_model(
@@ -398,30 +409,31 @@ if __name__ == "__main__":
         )
 
 
-    # 单句预测
+    # 单句预测（接口完全不变）
     def predict(text):
-        checkpoint = torch.load(os.path.join(CODE_ROOT, "best_gpt2_cls_model.pth"))
+        checkpoint = torch.load(os.path.join(CODE_ROOT, "best_albert_cls_model.pth"))
         tokenizer = checkpoint["tokenizer"]
         id2label = checkpoint["id2label"]
         config = checkpoint["config"]
         num_classes = len(id2label)
 
-        model = GPT2TextCls(num_classes, tokenizer, config["DROPOUT"]).to(device)
+        model = AlBERTTextCls(
+            num_classes,
+            config["DROPOUT"]
+        ).to(device)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
 
-        # 第四重保险：预测时也手动处理padding
-        tokens = tokenizer.tokenize(text.strip())
-        if len(tokens) > config["MAX_LEN"] - 2:
-            tokens = tokens[:config["MAX_LEN"] - 2]
-        tokens = ['<s>'] + tokens + ['</s>']
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
-        padding_length = config["MAX_LEN"] - len(input_ids)
-        input_ids += [tokenizer.pad_token_id] * padding_length
-        attention_mask = [1] * len(tokens) + [0] * padding_length
-
-        input_ids = torch.tensor([input_ids], dtype=torch.long).to(device)
-        attention_mask = torch.tensor([attention_mask], dtype=torch.long).to(device)
+        # AlBERT分词（原生支持padding）
+        encoding = tokenizer(
+            text.strip(),
+            truncation=True,
+            padding="max_length",
+            max_length=config["MAX_LEN"],
+            return_tensors="pt"
+        )
+        input_ids = encoding["input_ids"].to(device)
+        attention_mask = encoding["attention_mask"].to(device)
 
         with torch.no_grad():
             output = model(input_ids, attention_mask)
@@ -430,7 +442,7 @@ if __name__ == "__main__":
         return id2label[pred_id], prob
 
 
-    # 测试预测
+    # 测试预测（完全不变）
     test_texts = [
         "中华女子学院：本科层次仅1专业招男生",
         "两天价网站背后重重迷雾：做个网站究竟要多少钱",
