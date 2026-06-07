@@ -6,7 +6,7 @@ import jieba
 
 id_to_label = {}
 idx = 0
-with open('./data/class.txt', 'r', encoding='utf-8') as f1:
+with open('../data/class.txt', 'r', encoding='utf-8') as f1:
     for line in f1.readlines():
         line = line.strip('\n').strip()
         id_to_label[idx] = line
@@ -15,7 +15,7 @@ print('id_to_label:', id_to_label)
 count = 0
 train_data = []
 
-with open('./data/test.txt', 'r', encoding='utf-8') as f2:
+with open('../data/test.txt', 'r', encoding='utf-8') as f2:
     for line in f2.readlines():
         line = line.strip('\n').strip()
         sentence, label = line.split('\t')
@@ -32,12 +32,12 @@ with open('./data/test.txt', 'r', encoding='utf-8') as f2:
         if count % 10000 == 0:
             print('count=', count)
 
-with open('./data/train_fast.txt', 'w', encoding='utf-8') as f3:
+with open('../data/train_fast.txt', 'w', encoding='utf-8') as f3:
     for data in train_data:
         f3.write(data + '\n')
 print('FastText训练数据预处理完毕!')
 
-train_data_path = './data/train_fast.txt'
+train_data_path = '../data/train_fast.txt'
 dev_data_path = './data/dev_fast.txt'
 test_data_path = './data/test_fast.txt'
 

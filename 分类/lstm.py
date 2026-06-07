@@ -83,13 +83,13 @@ def load_data(file_path, min_freq=1):
             vocab, label2id, id2label, num_classes)
 
 
-# ====================== 2. RNN模型（新增）=====================
-class RNNTextCls(nn.Module):
+# ====================== 2. LSTM模型（替换GRU部分）=====================
+class LSTMTextCls(nn.Module):
     def __init__(self, vocab_size, embed_dim=32, hidden_dim=64, num_layers=1, dropout=0.1, num_classes=2):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        # 核心：使用基础RNN层
-        self.rnn = nn.RNN(
+        # 核心替换：nn.GRU → nn.LSTM
+        self.lstm = nn.LSTM(
             input_size=embed_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
@@ -102,9 +102,9 @@ class RNNTextCls(nn.Module):
 
     def forward(self, x):
         embed = self.dropout(self.embedding(x))
-        # RNN输出：(out, hn)，只需要序列输出out
-        out, _ = self.rnn(embed)
-        out = torch.mean(out, dim=1)  # 全局平均池化
+        # LSTM输出包含(out, (hn, cn))，我们只需要序列输出out
+        out, (_, _) = self.lstm(embed)
+        out = torch.mean(out, dim=1)
         out = self.dropout(out)
         return self.fc(out)
 
@@ -174,10 +174,10 @@ def evaluate(model, dataloader, criterion, device):
     return epoch_loss, epoch_acc
 
 
-# ====================== 4. 主函数（更新为RNN+Apple GPU支持）=====================
+# ====================== 4. 主函数（更新模型名称和保存路径）=====================
 if __name__ == "__main__":
     # 配置
-    DATA_PATH = "/Users/lhc456/Desktop/nlp课程/play_with_some_classical_nlpnetwork/data/train.txt"
+    DATA_PATH = "/data/train.txt"
     BATCH_SIZE = 1000
     EPOCHS = 5
     LR = 5e-4
@@ -187,16 +187,14 @@ if __name__ == "__main__":
     NUM_LAYERS = 1
     DROPOUT = 0.1
 
-    # 设备配置（支持NVIDIA CUDA+Apple Silicon MPS）
+    # 设备
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        print(f"使用 NVIDIA GPU: {torch.cuda.get_device_name(0)}")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
-        print("使用 Apple Silicon GPU (MPS)")
     else:
         device = torch.device("cpu")
-        print("使用 CPU")
+    print(f"使用设备：{device}")
 
     # 加载数据
     try:
@@ -229,9 +227,9 @@ if __name__ == "__main__":
     print(f"训练集批次数量：{len(train_loader)}")
     print(f"验证集批次数量：{len(dev_loader)}")
 
-    # 初始化RNN模型
+    # 初始化模型（替换为LSTM）
     print("\n初始化模型...")
-    model = RNNTextCls(len(vocab), EMBED_DIM, HIDDEN_DIM, NUM_LAYERS, DROPOUT, num_classes).to(device)
+    model = LSTMTextCls(len(vocab), EMBED_DIM, HIDDEN_DIM, NUM_LAYERS, DROPOUT, num_classes).to(device)
     print(f"模型参数量：{sum(p.numel() for p in model.parameters())}")
 
     # 优化器和损失函数
@@ -263,23 +261,23 @@ if __name__ == "__main__":
                     "DROPOUT": DROPOUT,
                     "MAX_LEN": MAX_LEN
                 }
-            }, "best_rnn_cls_model.pth")  # RNN模型保存文件名
-            print("\n✅ 保存最佳RNN模型")
+            }, "best_lstm_cls_model.pth")  # 更新保存文件名
+            print("\n✅ 保存最佳LSTM模型")
 
     print("\n" + "=" * 60)
     print(f"训练完成！最佳验证准确率：{best_acc:.4f}")
     print("=" * 60)
 
 
-    # 单句预测（RNN版本）
+    # 单句预测（更新为LSTM模型）
     def predict(text):
-        checkpoint = torch.load("best_rnn_cls_model.pth")
+        checkpoint = torch.load("best_lstm_cls_model.pth")
         vocab = checkpoint["vocab"]
         id2label = checkpoint["id2label"]
         config = checkpoint["config"]
         num_classes = len(id2label)
 
-        model = RNNTextCls(
+        model = LSTMTextCls(
             len(vocab),
             config["EMBED_DIM"],
             config["HIDDEN_DIM"],

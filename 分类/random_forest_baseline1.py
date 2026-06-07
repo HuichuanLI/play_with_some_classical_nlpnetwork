@@ -179,7 +179,7 @@ class RandomForestTextCls:
 # ====================== 3. 主函数 =====================
 if __name__ == "__main__":
     # 配置
-    DATA_PATH = "/Users/lhc456/Desktop/nlp课程/play_with_some_classical_nlpnetwork/data/train.txt"
+    DATA_PATH = "/data/train.txt"
     TEST_SIZE = 0.2
 
     # 随机森林超参数

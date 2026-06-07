@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-# ====================== 1. 数据处理（完全不变）=====================
+# ====================== 1. 数据处理 =====================
 class TextDataset(Dataset):
     def __init__(self, texts, labels, vocab, max_len=64):
         self.texts = texts
@@ -83,34 +83,31 @@ def load_data(file_path, min_freq=1):
             vocab, label2id, id2label, num_classes)
 
 
-# ====================== 2. 双向LSTM(BiLSTM)模型 =====================
-class BiLSTMTextCls(nn.Module):
+# ====================== 2. GRU模型 =====================
+class GRUTextCls(nn.Module):
     def __init__(self, vocab_size, embed_dim=32, hidden_dim=64, num_layers=1, dropout=0.1, num_classes=2):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        # 核心修改1：设置bidirectional=True
-        self.bilstm = nn.LSTM(
+        self.gru = nn.GRU(
             input_size=embed_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
-            bidirectional=True,  # 开启双向
+            bidirectional=False,
             dropout=0
         )
-        # 核心修改2：全连接层输入维度变为2*hidden_dim（两个方向的输出拼接）
-        self.fc = nn.Linear(2 * hidden_dim, num_classes)
+        self.fc = nn.Linear(hidden_dim, num_classes)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         embed = self.dropout(self.embedding(x))
-        # 双向LSTM输出形状：(batch, seq_len, 2*hidden_dim)
-        out, (_, _) = self.bilstm(embed)
-        out = torch.mean(out, dim=1)  # 全局平均池化，形状变为(batch, 2*hidden_dim)
+        out, _ = self.gru(embed)
+        out = torch.mean(out, dim=1)
         out = self.dropout(out)
         return self.fc(out)
 
 
-# ====================== 3. 训练&评估（完全不变）=====================
+# ====================== 3. 训练&评估（新增批次级准确率打印）====================
 def train(model, dataloader, optimizer, criterion, device):
     model.train()
     total_loss = 0
@@ -175,10 +172,10 @@ def evaluate(model, dataloader, criterion, device):
     return epoch_loss, epoch_acc
 
 
-# ====================== 4. 主函数（更新为BiLSTM+Apple GPU支持）=====================
+# ====================== 4. 主函数 =====================
 if __name__ == "__main__":
     # 配置
-    DATA_PATH = "/Users/lhc456/Desktop/nlp课程/play_with_some_classical_nlpnetwork/data/train.txt"
+    DATA_PATH = "/data/train.txt"  # 替换成你的数据文件路径
     BATCH_SIZE = 1000
     EPOCHS = 5
     LR = 5e-4
@@ -188,16 +185,9 @@ if __name__ == "__main__":
     NUM_LAYERS = 1
     DROPOUT = 0.1
 
-    # 设备配置（支持NVIDIA CUDA+Apple Silicon MPS）
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"使用 NVIDIA GPU: {torch.cuda.get_device_name(0)}")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-        print("使用 Apple Silicon GPU (MPS)")
-    else:
-        device = torch.device("cpu")
-        print("使用 CPU")
+    # 设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"使用设备：{device}")
 
     # 加载数据
     try:
@@ -230,9 +220,9 @@ if __name__ == "__main__":
     print(f"训练集批次数量：{len(train_loader)}")
     print(f"验证集批次数量：{len(dev_loader)}")
 
-    # 初始化双向LSTM模型
+    # 初始化模型
     print("\n初始化模型...")
-    model = BiLSTMTextCls(len(vocab), EMBED_DIM, HIDDEN_DIM, NUM_LAYERS, DROPOUT, num_classes).to(device)
+    model = GRUTextCls(len(vocab), EMBED_DIM, HIDDEN_DIM, NUM_LAYERS, DROPOUT, num_classes).to(device)
     print(f"模型参数量：{sum(p.numel() for p in model.parameters())}")
 
     # 优化器和损失函数
@@ -264,23 +254,23 @@ if __name__ == "__main__":
                     "DROPOUT": DROPOUT,
                     "MAX_LEN": MAX_LEN
                 }
-            }, "best_bilstm_cls_model.pth")  # 双向LSTM模型保存文件名
-            print("\n✅ 保存最佳双向LSTM模型")
+            }, "best_gru_cls_model.pth")
+            print("\n✅ 保存最佳模型")
 
     print("\n" + "=" * 60)
     print(f"训练完成！最佳验证准确率：{best_acc:.4f}")
     print("=" * 60)
 
 
-    # 单句预测（双向LSTM版本）
+    # 单句预测
     def predict(text):
-        checkpoint = torch.load("best_bilstm_cls_model.pth")
+        checkpoint = torch.load("best_gru_cls_model.pth")
         vocab = checkpoint["vocab"]
         id2label = checkpoint["id2label"]
         config = checkpoint["config"]
         num_classes = len(id2label)
 
-        model = BiLSTMTextCls(
+        model = GRUTextCls(
             len(vocab),
             config["EMBED_DIM"],
             config["HIDDEN_DIM"],
