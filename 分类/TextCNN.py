@@ -25,12 +25,12 @@ os.makedirs(DATA_ROOT, exist_ok=True)
 os.makedirs(CODE_ROOT, exist_ok=True)
 
 
-# ====================== 1. 数据处理（完全不变，原生支持padding）=====================
+# ====================== 1. 数据处理（恢复jieba分词+词汇表，与GRU完全一致）=====================
 class TextDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_len=64):
+    def __init__(self, texts, labels, vocab, max_len=64):
         self.texts = texts
         self.labels = labels
-        self.tokenizer = tokenizer
+        self.vocab = vocab
         self.max_len = max_len
 
     def __len__(self):
@@ -40,36 +40,24 @@ class TextDataset(Dataset):
         try:
             text = str(self.texts[idx]).strip()
             label = int(self.labels[idx])
-
-            # RoBERTa原生支持padding，不需要任何额外设置
-            encoding = self.tokenizer(
-                text,
-                truncation=True,
-                padding="max_length",
-                max_length=self.max_len,
-                return_tensors="pt"
-            )
-
-            return {
-                "input_ids": encoding["input_ids"].flatten(),
-                "attention_mask": encoding["attention_mask"].flatten(),
-                "label": torch.tensor(label, dtype=torch.long)
-            }
+            tokens = jieba.lcut(text)
+            ids = [self.vocab.get(token, self.vocab["<UNK>"]) for token in tokens]
+            if len(ids) > self.max_len:
+                ids = ids[:self.max_len]
+            else:
+                ids += [self.vocab["<PAD>"]] * (self.max_len - len(ids))
+            return torch.tensor(ids, dtype=torch.long), torch.tensor(label, dtype=torch.long)
         except Exception as e:
             print(f"❌ 第{idx}条数据出错：{e}")
-            return {
-                "input_ids": torch.zeros(self.max_len, dtype=torch.long),
-                "attention_mask": torch.zeros(self.max_len, dtype=torch.long),
-                "label": torch.tensor(0, dtype=torch.long)
-            }
+            return torch.zeros(self.max_len, dtype=torch.long), torch.tensor(0, dtype=torch.long)
 
 
 def load_data(train_path, dev_path=None, test_path=None, min_freq=1, test_size=0.2):
     """
-    加载数据：接口完全不变
+    加载数据：与GRU代码完全一致
     - 如果提供dev_path，使用独立验证集
     - 如果未提供dev_path，从训练集随机划分20%作为验证集
-    - 分词器和标签映射仅从训练集构建
+    - 词汇表和标签映射仅从训练集构建
     """
     print(f"正在加载训练集：{train_path}")
     train_df = pd.read_csv(train_path, sep="\t", header=0, names=["sentence", "label"], on_bad_lines="skip")
@@ -126,39 +114,60 @@ def load_data(train_path, dev_path=None, test_path=None, min_freq=1, test_size=0
         test_raw_labels = test_df["label"].tolist()
         test_labels = [label2id.get(label, 0) for label in test_raw_labels]
 
-    # 加载RoBERTa中文分词器（原生支持pad_token）
-    print("\n加载RoBERTa中文分词器...")
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained("hfl/chinese-roberta-wwm-ext")
-    print(f"✅ RoBERTa分词器加载完成，词汇表大小：{len(tokenizer)}")
-    print(f"  原生pad_token: {tokenizer.pad_token}")
-    print(f"  原生pad_token_id: {tokenizer.pad_token_id}")
+    # 仅从训练集构建词汇表（与GRU完全一致）
+    print("\n构建词汇表...")
+    all_tokens = []
+    for text in train_texts:
+        all_tokens.extend(jieba.lcut(str(text).strip()))
+    counter = Counter(all_tokens)
+    vocab = {"<PAD>": 0, "<UNK>": 1}
+    for token, freq in counter.items():
+        if freq >= min_freq:
+            vocab[token] = len(vocab)
+    print(f"词汇表大小：{len(vocab)}")
 
     return (train_texts, train_labels, dev_texts, dev_labels, test_texts, test_labels,
-            tokenizer, label2id, id2label, num_classes)
+            vocab, label2id, id2label, num_classes)
 
 
-# ====================== 2. RoBERTa模型（接口与所有模型完全一致）=====================
-class RoBERTaTextCls(nn.Module):
-    def __init__(self, num_classes, dropout=0.1):
+# ====================== 2. TextCNN模型（经典实现，接口与所有模型完全一致）=====================
+class TextCNN(nn.Module):
+    def __init__(self, vocab_size, embed_dim=128, num_filters=128, filter_sizes=[2, 3, 4], dropout=0.1, num_classes=2):
         super().__init__()
-        from transformers import AutoModelForSequenceClassification
-        # 加载预训练RoBERTa模型（中文文本分类黄金标准）
-        self.roberta = AutoModelForSequenceClassification.from_pretrained(
-            "hfl/chinese-roberta-wwm-ext",
-            num_labels=num_classes
-        )
+        # 嵌入层
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
 
-        # 冻结前10层，只训练最后2层（加快训练速度，效果几乎不变）
-        for param in list(self.roberta.parameters())[:-4]:
-            param.requires_grad = False
+        # 多尺度卷积层
+        self.convs = nn.ModuleList([
+            nn.Conv1d(
+                in_channels=embed_dim,
+                out_channels=num_filters,
+                kernel_size=fs
+            ) for fs in filter_sizes
+        ])
 
+        # 全连接层
+        self.fc = nn.Linear(num_filters * len(filter_sizes), num_classes)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, input_ids, attention_mask=None):
-        # 接口与所有模型完全一致：输入张量，输出logits
-        outputs = self.roberta(input_ids=input_ids, attention_mask=attention_mask)
-        return self.dropout(outputs.logits)
+    def forward(self, x):
+        # x: [batch_size, seq_len]
+        embed = self.embedding(x)  # [batch_size, seq_len, embed_dim]
+        embed = embed.permute(0, 2, 1)  # [batch_size, embed_dim, seq_len] (Conv1d要求通道在前)
+
+        # 多尺度卷积+池化
+        conv_outs = []
+        for conv in self.convs:
+            out = F.relu(conv(embed))  # [batch_size, num_filters, seq_len - kernel_size + 1]
+            out = F.max_pool1d(out, out.size(2))  # [batch_size, num_filters, 1]
+            conv_outs.append(out.squeeze(2))  # [batch_size, num_filters]
+
+        # 拼接所有卷积结果
+        out = torch.cat(conv_outs, dim=1)  # [batch_size, num_filters * len(filter_sizes)]
+        out = self.dropout(out)
+
+        # 分类
+        return self.fc(out)
 
 
 # ====================== 3. 训练&评估（完全不变）=====================
@@ -168,13 +177,10 @@ def train(model, dataloader, optimizer, criterion, device):
     total_correct = 0
     total_samples = 0
     print("\n开始训练...")
-    for batch_idx, batch in enumerate(dataloader):
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        y = batch["label"].to(device)
-
+    for batch_idx, (x, y) in enumerate(dataloader):
+        x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        outputs = model(input_ids, attention_mask)
+        outputs = model(x)
         loss = criterion(outputs, y)
         loss.backward()
         optimizer.step()
@@ -206,12 +212,9 @@ def evaluate(model, dataloader, criterion, device, dataset_name="验证集"):
 
     print(f"\n开始{dataset_name}评估...")
     with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            y = batch["label"].to(device)
-
-            outputs = model(input_ids, attention_mask)
+        for batch_idx, (x, y) in enumerate(dataloader):
+            x, y = x.to(device), y.to(device)
+            outputs = model(x)
             loss = criterion(outputs, y)
 
             pred = torch.argmax(outputs, dim=1)
@@ -252,7 +255,7 @@ def test_model(model, test_loader, criterion, device, id2label, save_report=True
 
     # 保存报告和混淆矩阵
     if save_report:
-        report_path = os.path.join(CODE_ROOT, "roberta_test_report.txt")
+        report_path = os.path.join(CODE_ROOT, "textcnn_test_report.txt")
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(f"测试集准确率：{test_acc:.4f}\n\n")
             f.write("分类报告：\n")
@@ -267,8 +270,8 @@ def test_model(model, test_loader, criterion, device, id2label, save_report=True
                     xticklabels=target_names, yticklabels=target_names)
         plt.xlabel("预测标签")
         plt.ylabel("真实标签")
-        plt.title("RoBERTa测试集混淆矩阵")
-        cm_path = os.path.join(CODE_ROOT, "roberta_confusion_matrix.png")
+        plt.title("TextCNN测试集混淆矩阵")
+        cm_path = os.path.join(CODE_ROOT, "textcnn_confusion_matrix.png")
         plt.savefig(cm_path, dpi=300, bbox_inches="tight")
         print(f"✅ 混淆矩阵图已保存为 {cm_path}")
 
@@ -277,18 +280,21 @@ def test_model(model, test_loader, criterion, device, id2label, save_report=True
 
 # ====================== 4. 主函数（几乎完全不变）=====================
 if __name__ == "__main__":
-    # 配置（RoBERTa与MacBERT相当，batch_size建议16）
+    # 配置（TextCNN是小模型，batch_size可以开到很大）
     TRAIN_PATH = os.path.join(DATA_ROOT, "train.txt")
     DEV_PATH = os.path.join(DATA_ROOT, "dev.txt")
     TEST_PATH = os.path.join(DATA_ROOT, "test.txt")
 
-    BATCH_SIZE = 1024
-    EPOCHS = 3
-    LR = 2e-5
+    BATCH_SIZE = 1000  # TextCNN可以用超大batch_size
+    EPOCHS = 5
+    LR = 1e-3
     MAX_LEN = 64
+    EMBED_DIM = 128
+    NUM_FILTERS = 128
+    FILTER_SIZES = [2, 3, 4]
     DROPOUT = 0.1
 
-    # 设备配置（RoBERTa在MPS上兼容性很好）
+    # 设备配置（TextCNN在CPU上也极快）
     if torch.cuda.is_available():
         device = torch.device("cuda")
         print(f"使用 NVIDIA GPU: {torch.cuda.get_device_name(0)}")
@@ -319,16 +325,16 @@ if __name__ == "__main__":
     # 加载数据（接口完全不变）
     try:
         (train_texts, train_labels, dev_texts, dev_labels, test_texts, test_labels,
-         tokenizer, label2id, id2label, num_classes) = load_data(TRAIN_PATH, DEV_PATH, TEST_PATH)
+         vocab, label2id, id2label, num_classes) = load_data(TRAIN_PATH, DEV_PATH, TEST_PATH)
     except Exception as e:
         print(f"❌ 数据加载失败：{e}")
         exit()
 
     # 构建数据集和加载器（完全不变）
     print("\n构建数据集...")
-    train_dataset = TextDataset(train_texts, train_labels, tokenizer, MAX_LEN)
-    dev_dataset = TextDataset(dev_texts, dev_labels, tokenizer, MAX_LEN)
-    test_dataset = TextDataset(test_texts, test_labels, tokenizer, MAX_LEN) if test_texts else None
+    train_dataset = TextDataset(train_texts, train_labels, vocab, MAX_LEN)
+    dev_dataset = TextDataset(dev_texts, dev_labels, vocab, MAX_LEN)
+    test_dataset = TextDataset(test_texts, test_labels, vocab, MAX_LEN) if test_texts else None
 
     train_loader = DataLoader(
         train_dataset,
@@ -357,13 +363,20 @@ if __name__ == "__main__":
     if test_loader:
         print(f"测试集批次数量：{len(test_loader)}")
 
-    # 初始化RoBERTa模型（接口与所有模型完全一致）
-    print("\n初始化RoBERTa文本分类模型...")
-    model = RoBERTaTextCls(num_classes, DROPOUT).to(device)
-    print(f"可训练参数数量：{sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    # 初始化TextCNN模型（接口与所有模型完全一致）
+    print("\n初始化TextCNN文本分类模型...")
+    model = TextCNN(
+        len(vocab),
+        EMBED_DIM,
+        NUM_FILTERS,
+        FILTER_SIZES,
+        DROPOUT,
+        num_classes
+    ).to(device)
+    print(f"模型参数量：{sum(p.numel() for p in model.parameters()):,}")
 
     # 优化器和损失函数（完全不变）
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     criterion = nn.CrossEntropyLoss()
 
     # 训练循环（完全不变）
@@ -381,15 +394,18 @@ if __name__ == "__main__":
             best_dev_acc = dev_acc
             torch.save({
                 "model_state_dict": model.state_dict(),
-                "tokenizer": tokenizer,
+                "vocab": vocab,
                 "label2id": label2id,
                 "id2label": id2label,
                 "config": {
+                    "EMBED_DIM": EMBED_DIM,
+                    "NUM_FILTERS": NUM_FILTERS,
+                    "FILTER_SIZES": FILTER_SIZES,
                     "DROPOUT": DROPOUT,
                     "MAX_LEN": MAX_LEN
                 }
-            }, os.path.join(CODE_ROOT, "best_roberta_cls_model.pth"))
-            print("\n✅ 保存最佳RoBERTa模型")
+            }, os.path.join(CODE_ROOT, "best_textcnn_cls_model.pth"))
+            print("\n✅ 保存最佳TextCNN模型")
 
     print("\n" + "=" * 60)
     print(f"训练完成！最佳验证准确率：{best_dev_acc:.4f}")
@@ -401,11 +417,7 @@ if __name__ == "__main__":
         print("开始测试集评估")
         print("=" * 60)
 
-        with torch.serialization.safe_globals([BertTokenizerFast]):
-            checkpoint = torch.load(
-                os.path.join(CODE_ROOT, "best_roberta_cls_model.pth"),
-                map_location="cuda" if torch.cuda.is_available() else "cpu"
-            )
+        checkpoint = torch.load(os.path.join(CODE_ROOT, "best_textcnn_cls_model.pth"))
         model.load_state_dict(checkpoint["model_state_dict"])
 
         test_loss, test_acc, test_report, test_cm = test_model(
@@ -415,32 +427,33 @@ if __name__ == "__main__":
 
     # 单句预测（接口完全不变）
     def predict(text):
-        checkpoint = torch.load(os.path.join(CODE_ROOT, "best_roberta_cls_model.pth"))
-        tokenizer = checkpoint["tokenizer"]
+        checkpoint = torch.load(os.path.join(CODE_ROOT, "best_textcnn_cls_model.pth"))
+        vocab = checkpoint["vocab"]
         id2label = checkpoint["id2label"]
         config = checkpoint["config"]
         num_classes = len(id2label)
 
-        model = RoBERTaTextCls(
-            num_classes,
-            config["DROPOUT"]
+        model = TextCNN(
+            len(vocab),
+            config["EMBED_DIM"],
+            config["NUM_FILTERS"],
+            config["FILTER_SIZES"],
+            config["DROPOUT"],
+            num_classes
         ).to(device)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
 
-        # RoBERTa分词（原生支持padding）
-        encoding = tokenizer(
-            text.strip(),
-            truncation=True,
-            padding="max_length",
-            max_length=config["MAX_LEN"],
-            return_tensors="pt"
-        )
-        input_ids = encoding["input_ids"].to(device)
-        attention_mask = encoding["attention_mask"].to(device)
+        tokens = jieba.lcut(text.strip())
+        ids = [vocab.get(token, vocab["<UNK>"]) for token in tokens]
+        if len(ids) > config["MAX_LEN"]:
+            ids = ids[:config["MAX_LEN"]]
+        else:
+            ids += [vocab["<PAD>"]] * (config["MAX_LEN"] - len(ids))
+        x = torch.tensor([ids], dtype=torch.long).to(device)
 
         with torch.no_grad():
-            output = model(input_ids, attention_mask)
+            output = model(x)
             pred_id = torch.argmax(output, dim=1).item()
             prob = F.softmax(output, dim=1)[0][pred_id].item()
         return id2label[pred_id], prob
