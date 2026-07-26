@@ -1,7 +1,7 @@
 import torch
 from config import ModelConfig, GRPOConfig
 from model import DeepseekForCausalLM
-from data import prepare_dataset
+from data import prepare_dataset_from_hf
 from trainer import GRPOTrainer
 from transformers import AutoTokenizer
 
@@ -24,8 +24,14 @@ def main():
     print(f"模型总参数量: {total_params / 1e6:.2f}M")
 
     # 3. 加载数据集
-    data_path = "./gsm8k/main/train-00000-of-00001.parquet"  # 自行替换路径
-    train_data = prepare_dataset(data_path)
+    from datasets import load_dataset
+    import os
+
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+    train_data = prepare_dataset_from_hf(split="train")
+    test_data = prepare_dataset_from_hf(split="test")  # 测试集可留作后续评估
+
     print(f"训练集大小: {len(train_data)}")
 
     # 4. 启动训练

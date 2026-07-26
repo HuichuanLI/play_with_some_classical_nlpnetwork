@@ -71,8 +71,10 @@ class GRPOTrainer:
             prompt_ids,
             max_new_tokens=self.config.max_completion_length,
             temperature=1.0,
-            do_sample=True
+            do_sample=True,
+            eos_token_id=self.tokenizer.eos_token_id  # 传入分词器真实EOS ID
         )
+
         completion_ids = output_ids[:, prompt_length:]
         completion_mask = create_completion_mask(completion_ids, self.tokenizer.eos_token_id)
 

@@ -97,13 +97,13 @@ class DeepseekForCausalLM(nn.Module):
         return logits, presents, all_gate_probs
 
     @torch.no_grad()
-    def generate(self, input_ids, max_new_tokens=128, temperature=0.7, do_sample=True):
-        """自回归生成，支持KV Cache加速，对应文档KV Cache逻辑"""
+    def generate(self, input_ids, max_new_tokens=128, temperature=0.7, do_sample=True, eos_token_id=2):
+        """自回归生成，支持KV Cache加速，兼容批量输入"""
         self.eval()
         batch_size = input_ids.shape[0]
         past_key_values = None
 
-        # Prefill 阶段
+        # Prefill 阶段：处理全量prompt
         logits, past_key_values, _ = self.forward(input_ids, past_key_values=past_key_values, use_cache=True)
         next_token_logits = logits[:, -1, :] / temperature
 
@@ -114,7 +114,7 @@ class DeepseekForCausalLM(nn.Module):
 
         generated = [next_token]
 
-        # Decoding 阶段
+        # Decoding 阶段：逐token生成
         for _ in range(max_new_tokens - 1):
             logits, past_key_values, _ = self.forward(next_token, past_key_values=past_key_values, use_cache=True)
             next_token_logits = logits[:, -1, :] / temperature
@@ -125,7 +125,9 @@ class DeepseekForCausalLM(nn.Module):
                 next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
             generated.append(next_token)
-            if next_token.item() == 2:  # EOS
+
+            # 批量判断：所有样本都生成EOS才提前停止
+            if (next_token == eos_token_id).all():
                 break
 
         return torch.cat([input_ids, torch.cat(generated, dim=1)], dim=1)

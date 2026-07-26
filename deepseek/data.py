@@ -101,3 +101,28 @@ class GRPODataset(Dataset):
 
     def __getitem__(self, idx):
         return self.data[idx]
+
+
+from datasets import load_dataset
+
+
+def prepare_dataset_from_hf(split="train"):
+    """
+    从 HuggingFace 加载 GSM8K 并格式化为 GRPO 训练所需格式
+    Args:
+        split: "train" / "test"
+    Returns:
+        list[dict]: 每个元素包含 prompt 和 answer
+    """
+    ds = load_dataset("openai/gsm8k", "main", split=split)
+    df = ds.to_pandas()
+
+    formatted_data = []
+    for _, row in df.iterrows():
+        prompt_str = build_prompt([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": row["question"]}
+        ])
+        answer = extract_answer_from_dataset(row["answer"])
+        formatted_data.append({"prompt": prompt_str, "answer": answer})
+    return formatted_data
